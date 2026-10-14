@@ -12,11 +12,14 @@ def get_link_classification_args(is_evaluation: bool = False):
     # arguments
     parser = argparse.ArgumentParser('Interface for the link prediction task')
     parser.add_argument('--test', action='store_true', default=False)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False,
+                        help='enable slow PyTorch autograd anomaly checks for debugging')
     parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='assist17',
-                        choices=['junyi','EdnetKT1','Slepemapy', 'assist17','assist12'])
+                        choices=['junyi', 'EdnetKT1', 'Slepemapy', 'assist17', 'assist17-mine', 'assist12'])
     parser.add_argument('--batch_size', type=int, default=2000, help='batch size')
     parser.add_argument('--model_name', type=str, default='DyGKT', help='name of the model',
-                        choices=['DyGKT','QIKT','IEKT','IPKT','DIMKT','simpleKT','CTNCM','AKT','DKT', 'TGAT', 'TGN', 'DyGFormer'])
+                        choices=['DyGKT', 'DyGKT-Contextual', 'QIKT', 'IEKT', 'IPKT', 'DIMKT',
+                                 'simpleKT', 'CTNCM', 'AKT', 'DKT', 'TGAT', 'TGN', 'DyGFormer'])
     parser.add_argument('--gpu', type=int, default=0, help='number of gpu to use')
 
     parser.add_argument('--ablation', type=str, default='-1', choices=['-1','q_qid','q_kid','counter', 'dual', 'embed','skill','time'], help='how to sample historical neighbors')
@@ -26,6 +29,10 @@ def get_link_classification_args(is_evaluation: bool = False):
     parser.add_argument('--state_dim', type=int, default=256, help='dimension of the student state embedding')
     
     parser.add_argument('--num_neighbors', type=int, default=50, help='number of neighbors to sample for each node')
+    parser.add_argument('--contextual_eps', type=float, default=0.6,
+                        help='temporal decay tolerance used by the DyGKT contextual sampler')
+    parser.add_argument('--contextual_gamma', type=int, default=2,
+                        help='candidate-window multiplier used by the DyGKT contextual sampler')
     
     parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
     parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')

@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from utils.utils import NeighborSampler
 from models.modules import TimeEncoder, TimeDualDecayEncoder
-import seaborn as sns
 
 # neighbor sampler strategy: recent
 
@@ -13,18 +12,30 @@ class DyGKT(nn.Module):
                  time_dim = 16,
                  num_neighbors : int = 50,
                  ablation = '-1',
+                 contextual_sampling: bool = False,
                  dropout : float = 0.5,
                  device:str='cuda:0'):
 
         super(DyGKT, self).__init__()
+
         self.num_neighbors = num_neighbors
         self.ablation = ablation
+        self.contextual_sampling = contextual_sampling
 
-        self.node_raw_features = torch.from_numpy(node_raw_features.astype(np.float32))#.to(device)
-        self.edge_raw_features = torch.from_numpy(edge_raw_features.astype(np.float32))#.to(device)
+        self.num_skills = int(np.unique(node_raw_features[:, 0]).max()) + 1
+        self.num_nodes = node_raw_features.shape[0]
 
-        self.num_skills = int(np.unique(self.node_raw_features[:, 0]).max()) + 1
-        self.num_nodes = self.node_raw_features.shape[0]
+        self.node_raw_features = torch.from_numpy(
+            node_raw_features.astype(np.float32)
+        ).to(device)
+
+        self.edge_raw_features = torch.from_numpy(
+            edge_raw_features.astype(np.float32)
+        ).to(device)
+
+        # Kept on CPU because contextual neighbor selection is performed by the
+        # NumPy-based sampler before embeddings are moved to the model device.
+        self.node_skills = np.asarray(node_raw_features[:, 0])
 
         self.edge_dim = 64
         self.node_dim = 64
@@ -58,28 +69,68 @@ class DyGKT(nn.Module):
     def compute_src_dst_node_temporal_embeddings(self,src_node_ids: np.ndarray, edge_ids:np.ndarray,
                                                 node_interact_times: np.ndarray,dst_node_ids: np.ndarray):
         #    def get_historical_neighbors(self, node_ids: np.ndarray, node_interact_times: np.ndarray, num_neighbors: int = 20):
-        src_neighbor_node_ids, src_neighbor_edge_ids, src_neighbor_times = self.neighbor_sampler.get_historical_neighbors(src_node_ids, node_interact_times, self.num_neighbors)
-        dst_neighbor_node_ids, dst_neighbor_edge_ids, dst_neighbor_times = self.neighbor_sampler.get_historical_neighbors(dst_node_ids, node_interact_times, self.num_neighbors)
+        if self.contextual_sampling:
+            target_skills = self.node_skills[dst_node_ids]
 
-        # src_neighbor_node_ids, ndarray, shape (batch_size, num_neighbors + 1)
-        src_neighbor_node_ids = np.concatenate((src_neighbor_node_ids, src_node_ids[:, np.newaxis]), axis=1)
-        # src_neighbor_edge_ids, ndarray, shape (batch_size, num_neighbors + 1)
-        src_neighbor_edge_ids = np.concatenate((src_neighbor_edge_ids, np.zeros((len(src_node_ids), 1)).astype(np.longlong)), axis=1)
-        # src_neighbor_times, ndarray, shape (batch_size, num_neighbors + 1)
-        src_neighbor_times = np.concatenate((src_neighbor_times, node_interact_times[:, np.newaxis]), axis=1)
+            # Student history is re-ranked using the skill of the current question.
+            src_neighbor_node_ids, src_neighbor_edge_ids, src_neighbor_times = \
+                self.neighbor_sampler.get_neighbors_dst(
+                    node_ids=src_node_ids,
+                    target_skill=target_skills,
+                    node_interact_times=node_interact_times,
+                    edge_ids=edge_ids
+                )
 
-        # dst_neighbor_node_ids, ndarray, shape (batch_size, num_neighbors + 1)
-        dst_neighbor_node_ids = np.concatenate(( dst_neighbor_node_ids, dst_node_ids[:, np.newaxis]), axis=1)
-        # dst_neighbor_edge_ids, ndarray, shape (batch_size, num_neighbors + 1)
-        dst_neighbor_edge_ids = np.concatenate((dst_neighbor_edge_ids, np.zeros((len(dst_node_ids), 1)).astype(np.longlong)), axis=1)
-        # dst_neighbor_times, ndarray, shape (batch_size, num_neighbors + 1)
-        dst_neighbor_times = np.concatenate((dst_neighbor_times, node_interact_times[:, np.newaxis]), axis=1)
+            # Question history remains purely recency-based.
+            dst_neighbor_node_ids, dst_neighbor_edge_ids, dst_neighbor_times = \
+                self.neighbor_sampler.get_neighbors_src(
+                    node_ids=dst_node_ids,
+                    node_interact_times=node_interact_times,
+                    edge_ids=edge_ids
+                )
+        else:
+            src_neighbor_node_ids, src_neighbor_edge_ids, src_neighbor_times = \
+                self.neighbor_sampler.get_historical_neighbors(
+                    src_node_ids, node_interact_times, self.num_neighbors
+                )
+            dst_neighbor_node_ids, dst_neighbor_edge_ids, dst_neighbor_times = \
+                self.neighbor_sampler.get_historical_neighbors(
+                    dst_node_ids, node_interact_times, self.num_neighbors
+                )
 
-        src_nodes_neighbor_co_occurrence_features = (torch.from_numpy(src_neighbor_node_ids[:,:-1]) == torch.from_numpy(dst_node_ids).unsqueeze(1).repeat(1, self.num_neighbors)).unsqueeze(-1).float().to(self.device)
-        dst_nodes_neighbor_co_occurrence_features = (torch.from_numpy(dst_neighbor_node_ids[:,:-1]) == torch.from_numpy(src_node_ids).unsqueeze(1).repeat(1, self.num_neighbors)).unsqueeze(-1).float().to(self.device)
+        # Normalize the legacy NumPy sampler and the contextual CUDA sampler to
+        # device tensors. From here onward the embedding path stays on-device.
+        src_neighbor_node_ids = torch.as_tensor(src_neighbor_node_ids, device=self.device)
+        src_neighbor_edge_ids = torch.as_tensor(src_neighbor_edge_ids, device=self.device)
+        src_neighbor_times = torch.as_tensor(src_neighbor_times, dtype=torch.float32, device=self.device)
+        dst_neighbor_node_ids = torch.as_tensor(dst_neighbor_node_ids, device=self.device)
+        dst_neighbor_edge_ids = torch.as_tensor(dst_neighbor_edge_ids, device=self.device)
+        dst_neighbor_times = torch.as_tensor(dst_neighbor_times, dtype=torch.float32, device=self.device)
+        src_ids_t = torch.as_tensor(src_node_ids, device=self.device)
+        dst_ids_t = torch.as_tensor(dst_node_ids, device=self.device)
+        interact_times_t = torch.as_tensor(node_interact_times, dtype=torch.float32, device=self.device)
 
-        src_node_skill = self.node_raw_features[torch.from_numpy(src_neighbor_node_ids)][:, :-1, 0].long().to(self.device)
-        dst_node_skill = self.node_raw_features[torch.from_numpy(dst_neighbor_node_ids)][:, -1, 0].long().to(self.device).unsqueeze(1).repeat(1, self.num_neighbors)
+        src_neighbor_node_ids = torch.cat((src_neighbor_node_ids, src_ids_t[:, None]), dim=1)
+        src_neighbor_edge_ids = torch.cat((src_neighbor_edge_ids, torch.zeros_like(src_ids_t[:, None])), dim=1)
+        src_neighbor_times = torch.cat((src_neighbor_times, interact_times_t[:, None]), dim=1)
+        dst_neighbor_node_ids = torch.cat((dst_neighbor_node_ids, dst_ids_t[:, None]), dim=1)
+        dst_neighbor_edge_ids = torch.cat((dst_neighbor_edge_ids, torch.zeros_like(dst_ids_t[:, None])), dim=1)
+        dst_neighbor_times = torch.cat((dst_neighbor_times, interact_times_t[:, None]), dim=1)
+
+        # Transfer each index array once. All comparisons and feature gathers
+        # below then stay on the GPU instead of triggering implicit transfers.
+        src_neighbor_ids_t = src_neighbor_node_ids
+        dst_neighbor_ids_t = dst_neighbor_node_ids
+
+        src_nodes_neighbor_co_occurrence_features = (
+            src_neighbor_ids_t[:, :-1] == dst_ids_t.unsqueeze(1)
+        ).unsqueeze(-1).float()
+        dst_nodes_neighbor_co_occurrence_features = (
+            dst_neighbor_ids_t[:, :-1] == src_ids_t.unsqueeze(1)
+        ).unsqueeze(-1).float()
+
+        src_node_skill = self.node_raw_features[src_neighbor_ids_t][:, :-1, 0].long()
+        dst_node_skill = self.node_raw_features[dst_neighbor_ids_t][:, -1, 0].long().unsqueeze(1)
 
         src_nodes_neighbor_skill_features = (src_node_skill == dst_node_skill).unsqueeze(-1).float()
         a = 1
@@ -91,10 +142,10 @@ class DyGKT(nn.Module):
         src_nodes_neighbor_skill_struct_features = self.projection_layer['struct'](a * src_nodes_neighbor_skill_features)
 
         src_nodes_neighbor_node_raw_features, src_nodes_edge_raw_features, src_nodes_neighbor_time_features = self.get_features(
-            node_interact_times=node_interact_times, nodes_edge_ids=src_neighbor_edge_ids,
+            node_interact_times=interact_times_t, nodes_edge_ids=src_neighbor_edge_ids,
             nodes_neighbor_ids=src_neighbor_node_ids, nodes_neighbor_times=src_neighbor_times)
         dst_nodes_neighbor_node_raw_features, dst_nodes_edge_raw_features, dst_nodes_neighbor_time_features = self.get_features(
-            node_interact_times=node_interact_times, nodes_edge_ids=dst_neighbor_edge_ids,
+            node_interact_times=interact_times_t, nodes_edge_ids=dst_neighbor_edge_ids,
             nodes_neighbor_ids=dst_neighbor_node_ids, nodes_neighbor_times=dst_neighbor_times)
         
         src_nodes_features = src_nodes_neighbor_node_raw_features + src_nodes_edge_raw_features + src_nodes_neighbor_time_features #+ src_nodes_neighbor_struct_features  # torch.cat((src_nodes_neighbor_node_raw_features, src_nodes_edge_raw_features),dim=-1) 
@@ -119,21 +170,29 @@ class DyGKT(nn.Module):
 
     def get_features(self, nodes_neighbor_ids: np.ndarray, nodes_edge_ids: np.ndarray,
                      nodes_neighbor_times: np.ndarray,node_interact_times: np.ndarray):
-        
+        node_ids_t = torch.as_tensor(nodes_neighbor_ids, device=self.device)
+        edge_ids_t = torch.as_tensor(nodes_edge_ids, device=self.device)
+
         if self.ablation in ['embed', 'q_kid']:
-            nodes_neighbor_node_raw_features = self.projection_layer['feature_Embed'](self.node_raw_features[torch.from_numpy(nodes_neighbor_ids)].to(self.device)[:,:,0].long()) 
+            nodes_neighbor_node_raw_features = self.projection_layer['feature_Embed'](self.node_raw_features[node_ids_t][:,:,0].long())
         elif self.ablation == 'q_qid':
-            nodes_neighbor_node_raw_features = self.projection_layer['node'](torch.from_numpy(nodes_neighbor_ids).to(self.device))  
+            nodes_neighbor_node_raw_features = self.projection_layer['node'](node_ids_t)
         else:
-            nodes_neighbor_node_raw_features = self.projection_layer['feature_Linear'](self.node_raw_features[torch.from_numpy(nodes_neighbor_ids)].to(self.device)) 
+            nodes_neighbor_node_raw_features = self.projection_layer['feature_Linear'](self.node_raw_features[node_ids_t])
         
         if self.ablation == 'dual':
-            nodes_neighbor_time_features = self.time_encoder(torch.from_numpy(node_interact_times[:,np.newaxis]-nodes_neighbor_times).float().to(self.device))
+            time_values = node_interact_times[:, np.newaxis] - nodes_neighbor_times
         else:   
-            nodes_neighbor_time_features = self.time_encoder(torch.from_numpy(nodes_neighbor_times).float().to(self.device))
+            time_values = nodes_neighbor_times
+
+        nodes_neighbor_time_features = self.time_encoder(
+            torch.as_tensor(time_values, dtype=torch.float32, device=self.device)
+        )
         
         nodes_neighbor_time_features = self.projection_layer['time'](nodes_neighbor_time_features)
-        nodes_edge_raw_features = self.projection_layer['edge'](self.edge_raw_features[torch.from_numpy(nodes_edge_ids)].to(self.device)[:,:,0].unsqueeze(-1)) 
+        nodes_edge_raw_features = self.projection_layer['edge'](
+            self.edge_raw_features[edge_ids_t][:, :, 0].unsqueeze(-1)
+        )
         
         if self.ablation == 'time':
             nodes_neighbor_time_features *= 0

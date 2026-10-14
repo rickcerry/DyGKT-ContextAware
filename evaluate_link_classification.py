@@ -27,6 +27,7 @@ from evaluate_models_utils import evaluate_model_link_classification
 from utils.DataLoader import get_idx_data_loader, get_link_classification_data
 from utils.EarlyStopping import EarlyStopping
 from utils.load_configs import get_link_classification_args
+from utils.ContextualNeighborSampler import HyperParameters, get_contextual_neighbor_sampler
 
 if __name__ == "__main__":
 
@@ -39,9 +40,27 @@ if __name__ == "__main__":
     node_raw_features, edge_raw_features, full_data, train_data, val_data, test_data, new_node_val_data, new_node_test_data = \
         get_link_classification_data(dataset_name=args.dataset_name, val_ratio=args.val_ratio, test_ratio=args.test_ratio)
 
-    # initialize validation and test neighbor sampler to retrieve temporal graph
-    full_neighbor_sampler = get_neighbor_sampler(data=full_data, sample_neighbor_strategy=args.sample_neighbor_strategy,
-                                                 time_scaling_factor=args.time_scaling_factor, seed=1)
+    # Use the same sampling policy and hyperparameters used during training.
+    if args.model_name == 'DyGKT-Contextual':
+        contextual_hp = HyperParameters(
+            eps=args.contextual_eps,
+            number_of_neighbors=args.num_neighbors,
+            gamma=args.contextual_gamma
+        )
+        full_neighbor_sampler = get_contextual_neighbor_sampler(
+            data=full_data,
+            hp=contextual_hp,
+            node_raw_features=node_raw_features,
+            seed=1,
+            device=args.device
+        )
+    else:
+        full_neighbor_sampler = get_neighbor_sampler(
+            data=full_data,
+            sample_neighbor_strategy=args.sample_neighbor_strategy,
+            time_scaling_factor=args.time_scaling_factor,
+            seed=1
+        )
 
     # initialize negative samplers, set seeds for validation and testing so negatives are the same across different runs
     # in the inductive setting, negatives are sampled only amongst other new nodes
@@ -111,13 +130,14 @@ if __name__ == "__main__":
                                         dropout=args.dropout,
                                         num_neighbors=args.num_neighbors, 
                                         device=args.device)
-        elif args.model_name == 'DyGKT':
+        elif args.model_name in ['DyGKT', 'DyGKT-Contextual']:
             dynamic_backbone = DyGKT(node_raw_features=node_raw_features,
                                         edge_raw_features=edge_raw_features,
                                         dropout=args.dropout, 
                                         num_neighbors=args.num_neighbors,
                                         device=args.device,
-                                        ablation=args.ablation)
+                                        ablation=args.ablation,
+                                        contextual_sampling=args.model_name == 'DyGKT-Contextual')
 
         elif args.model_name == 'CTNCM':
             dynamic_backbone = CTNCM(node_raw_features=node_raw_features,

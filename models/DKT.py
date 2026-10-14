@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from utils.utils import NeighborSampler
 from models.modules import TimeEncoder, TransformerEncoder, TimeDecayEncoder, TimeDualDecayEncoder, multiParallelEncoder
-import seaborn as sns
 
 class DKT(nn.Module):
     def __init__(self, node_raw_features: np.ndarray,

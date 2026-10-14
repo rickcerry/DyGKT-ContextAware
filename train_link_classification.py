@@ -29,6 +29,7 @@ from utils.metrics import get_link_classification_metrics
 from utils.DataLoader import get_idx_data_loader, get_link_classification_data
 from utils.EarlyStopping import EarlyStopping
 from utils.load_configs import get_link_classification_args
+from utils.ContextualNeighborSampler import HyperParameters, get_contextual_neighbor_sampler
 
 if __name__ == "__main__":
 
@@ -41,13 +42,41 @@ if __name__ == "__main__":
     node_raw_features, edge_raw_features, full_data, train_data, val_data, test_data, new_node_val_data, new_node_test_data = \
         get_link_classification_data(dataset_name=args.dataset_name, val_ratio=args.val_ratio, test_ratio=args.test_ratio)
     # print(node_raw_features)
-    # initialize training neighbor sampler to retrieve temporal graph
-    train_neighbor_sampler = get_neighbor_sampler(data=train_data, sample_neighbor_strategy=args.sample_neighbor_strategy,
-                                                  time_scaling_factor=args.time_scaling_factor, seed=0)
-
-    # initialize validation and test neighbor sampler to retrieve temporal graph
-    full_neighbor_sampler = get_neighbor_sampler(data=full_data, sample_neighbor_strategy=args.sample_neighbor_strategy,
-                                                 time_scaling_factor=args.time_scaling_factor, seed=1)
+    # DyGKT re-ranks student history using the skill of the current question.
+    # Other backbones retain the original DyGLib neighbor sampler.
+    if args.model_name == 'DyGKT-Contextual':
+        contextual_hp = HyperParameters(
+            eps=args.contextual_eps,
+            number_of_neighbors=args.num_neighbors,
+            gamma=args.contextual_gamma
+        )
+        train_neighbor_sampler = get_contextual_neighbor_sampler(
+            data=train_data,
+            hp=contextual_hp,
+            node_raw_features=node_raw_features,
+            seed=0,
+            device=args.device
+        )
+        full_neighbor_sampler = get_contextual_neighbor_sampler(
+            data=full_data,
+            hp=contextual_hp,
+            node_raw_features=node_raw_features,
+            seed=1,
+            device=args.device
+        )
+    else:
+        train_neighbor_sampler = get_neighbor_sampler(
+            data=train_data,
+            sample_neighbor_strategy=args.sample_neighbor_strategy,
+            time_scaling_factor=args.time_scaling_factor,
+            seed=0
+        )
+        full_neighbor_sampler = get_neighbor_sampler(
+            data=full_data,
+            sample_neighbor_strategy=args.sample_neighbor_strategy,
+            time_scaling_factor=args.time_scaling_factor,
+            seed=1
+        )
 
     # initialize negative samplers, set seeds for validation and testing so negatives are the same across different runs
     # in the inductive setting, negatives are sampled only amongst other new nodes
@@ -108,13 +137,14 @@ if __name__ == "__main__":
                                         dropout=args.dropout,
                                         num_neighbors=args.num_neighbors, 
                                         device=args.device)
-        elif args.model_name == 'DyGKT':
+        elif args.model_name in ['DyGKT', 'DyGKT-Contextual']:
             dynamic_backbone = DyGKT(node_raw_features=node_raw_features,
                                         edge_raw_features=edge_raw_features,
                                         dropout=args.dropout, 
                                         num_neighbors=args.num_neighbors,
                                         device=args.device,
-                                        ablation=args.ablation)
+                                        ablation=args.ablation,
+                                        contextual_sampling=args.model_name == 'DyGKT-Contextual')
 
         elif args.model_name == 'CTNCM':
             dynamic_backbone = CTNCM(node_raw_features=node_raw_features,
@@ -180,7 +210,7 @@ if __name__ == "__main__":
                                          max_input_sequence_length=args.max_input_sequence_length, device=args.device)
         else:
             raise ValueError(f"Wrong value for model_name {args.model_name}!")
-        if args.model_name == 'DyGKT':
+        if args.model_name in ['DyGKT', 'DyGKT-Contextual']:
             link_predictor = MergeLayer(input_dim1=64, input_dim2=64,hidden_dim=64,output_dim=1)
         else:
             link_predictor = MergeLayer(node_raw_features.shape[1],input_dim2=node_raw_features.shape[1], hidden_dim=node_raw_features.shape[1], output_dim=1)#input_dim1=64, input_dim2=64,hidden_dim=64,output_dim=1)#node_raw_features.shape[1],input_dim2=node_raw_features.shape[1], hidden_dim=node_raw_features.shape[1], output_dim=1)
@@ -202,7 +232,10 @@ if __name__ == "__main__":
                                        save_model_name=args.save_model_name, logger=logger, model_name=args.model_name)
 
         loss_func = nn.BCELoss()
-        torch.autograd.set_detect_anomaly(True)
+        # Anomaly detection synchronizes CPU and GPU during backward and can
+        # leave accelerator jobs below Berzelius' utilization threshold. Keep
+        # it available as an explicit debugging option only.
+        torch.autograd.set_detect_anomaly(args.detect_anomaly)
         final_memory = None
         for epoch in range(args.num_epochs):
             if args.test and epoch > 0:
@@ -214,7 +247,7 @@ if __name__ == "__main__":
                 print(args.model_name)
                 sys.exit()
             model.train()
-            if args.model_name in ['DyGKT','QIKT','IEKT','IPKT','DIMKT', 'TGAT', 'TGN', 'DyGFormer','DKT','AKT','CTNCM','simpleKT']:
+            if args.model_name in ['DyGKT', 'DyGKT-Contextual', 'QIKT','IEKT','IPKT','DIMKT', 'TGAT', 'TGN', 'DyGFormer','DKT','AKT','CTNCM','simpleKT']:
                 # training, only use training graph
                 model[0].set_neighbor_sampler(train_neighbor_sampler)
             if args.model_name in ['TGN']:
@@ -235,7 +268,7 @@ if __name__ == "__main__":
 
              
                 
-                if args.model_name in ['DyGKT','DKT','AKT','CTNCM','simpleKT']:
+                if args.model_name in ['DyGKT', 'DyGKT-Contextual', 'DKT','AKT','CTNCM','simpleKT']:
                     batch_src_node_embeddings,batch_dst_node_embeddings = \
                         model[0].compute_src_dst_node_temporal_embeddings(src_node_ids=batch_src_node_ids,
                                                                           edge_ids = batch_edge_ids,
@@ -287,16 +320,20 @@ if __name__ == "__main__":
                 labels = torch.tensor(batch_edge_labels, dtype=torch.float32,device=args.device)
                 loss = loss_func(input=predicts, target=labels)
                 final_memory = torch.cuda.memory_allocated()
-                train_losses.append(loss.item())
+                # item() synchronizes CUDA: do it once per batch and reuse it.
+                loss_value = loss.item()
+                train_losses.append(loss_value)
 
-                train_predicts.append(predicts)
-                train_labels.append(labels)
+                # Metrics do not need gradients. Keeping these tensors attached
+                # retains every batch's autograd graph until the epoch ends.
+                train_predicts.append(predicts.detach())
+                train_labels.append(labels.detach())
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 
-                train_idx_data_loader_tqdm.set_description(f'Epoch: {epoch + 1}, train for the {batch_idx + 1}-th batch, train loss: {loss.item()}')
+                train_idx_data_loader_tqdm.set_description(f'Epoch: {epoch + 1}, train for the {batch_idx + 1}-th batch, train loss: {loss_value}')
 
                 if args.model_name in ['TGN']:
                     # detach the memories and raw messages of nodes in the memory bank after each batch, so we don't back propagate to the start of time

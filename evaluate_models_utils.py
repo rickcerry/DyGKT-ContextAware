@@ -44,7 +44,7 @@ def evaluate_model_link_classification(model_name: str, model: nn.Module, neighb
                 evaluate_data.node_interact_times[evaluate_data_indices], evaluate_data.edge_ids[evaluate_data_indices],\
                 evaluate_data.labels[evaluate_data_indices]
            
-            if model_name in ['DyGKT','QIKT','IEKT','IPKT','DIMKT','DKT','AKT','CTNCM','simpleKT']:
+            if model_name in ['DyGKT', 'DyGKT-Contextual', 'QIKT','IEKT','IPKT','DIMKT','DKT','AKT','CTNCM','simpleKT']:
                 
                 batch_src_node_embeddings,batch_dst_node_embeddings = \
                         model[0].compute_src_dst_node_temporal_embeddings(src_node_ids=batch_src_node_ids,
@@ -89,12 +89,14 @@ def evaluate_model_link_classification(model_name: str, model: nn.Module, neighb
             labels = torch.tensor(batch_edge_labels, dtype=torch.float32,device=predicts.device)            
             
             loss = loss_func(input=predicts, target=labels)
-            evaluate_losses.append(loss.item())
+            # Avoid synchronizing the GPU twice for the same scalar.
+            loss_value = loss.item()
+            evaluate_losses.append(loss_value)
 
             evaluate_predicts.append(predicts)
             evaluate_labels.append(labels)
 
-            evaluate_idx_data_loader_tqdm.set_description(f'evaluate for the {batch_idx + 1}-th batch, evaluate loss: {loss.item()}')
+            evaluate_idx_data_loader_tqdm.set_description(f'evaluate for the {batch_idx + 1}-th batch, evaluate loss: {loss_value}')
 
         evaluate_predict = torch.cat(evaluate_predicts, dim=0)
         evaluate_label = torch.cat(evaluate_labels, dim=0)
@@ -102,4 +104,3 @@ def evaluate_model_link_classification(model_name: str, model: nn.Module, neighb
         evaluate_metrics.append(get_link_classification_metrics(predicts=evaluate_predict, labels=evaluate_label))
 
     return evaluate_losses, evaluate_metrics
-
