@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Environment variables
+.env
+
+# Datasets
+data/
+datasets/
+*.csv
+*.parquet
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Training outputs
+logs/
+results/
+checkpoints/
+outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.log
